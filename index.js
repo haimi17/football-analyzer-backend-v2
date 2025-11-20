@@ -19,7 +19,6 @@ if (!ODDS_API_KEY) {
 
 const API_BASE = "https://v3.football.api-sports.io";
 
-// Configurare centralizată
 const CONFIG = {
   POISSON: {
     MAX_GOALS: 7,
@@ -46,7 +45,7 @@ const CONFIG = {
     MAX_FACTOR: 1.4
   },
   CACHE: {
-    TTL: 30 * 60 * 1000 // 30 minute
+    TTL: 30 * 60 * 1000
   }
 };
 
@@ -69,7 +68,6 @@ const COMPETITIONS = [
   { id: 284, code: "RO2", name: "Liga 2", apiLeagueId: 284, season: CURRENT_SEASON }
 ];
 
-// Cache cu TTL
 const teamStatsCache = new Map();
 const teamFormCache = new Map();
 
@@ -109,7 +107,6 @@ function factorial(n) {
 function poissonPMF(lambda, k) {
   if (lambda <= 0) return k === 0 ? 1 : 0;
   
-  // Aproximare Stirling pentru k > 10 (optimizare)
   if (k > 10) {
     return Math.exp(-lambda + k * Math.log(lambda) - 
            (k * Math.log(k) - k + 0.5 * Math.log(2 * Math.PI * k)));
@@ -250,10 +247,9 @@ function computeFormFactor(list) {
   };
 }
 
-// BUG FIX: Funcția corectată
 function computeDistributionClarity(h, d, a) {
   const s = [h, d, a].sort((x, y) => y - x);
-  const diff = (s[0] - s[1]) / 100; // ✅ Corect: diferența dintre primele două
+  const diff = (s[0] - s[1]) / 100;
   return Number(Math.min(1, diff / 0.4).toFixed(2));
 }
 
@@ -398,7 +394,6 @@ function buildPrediction(lambdaHome, lambdaAway, ctx) {
   return out;
 }
 
-// Metrics tracking
 const predictionMetrics = {
   total: 0,
   withGoodData: 0,
@@ -410,7 +405,6 @@ async function buildPredictionForFixture(comp, f) {
   const home = f.teams?.home?.id;
   const away = f.teams?.away?.id;
 
-  // Validare îmbunătățită
   if (!home || !away) {
     predictionMetrics.fallbacks++;
     return createFallbackPrediction('MISSING_TEAM_DATA');
@@ -490,7 +484,6 @@ async function buildPredictionForFixture(comp, f) {
   return buildPrediction(lH, lA, ctx);
 }
 
-// Endpoint-uri
 app.get("/api/test-key", (req, res) =>
   res.json({ ok: !!API_KEY, message: API_KEY ? "Cheie OK" : "Missing" })
 );
@@ -517,7 +510,6 @@ app.get("/api/competitions", (req, res) => {
   );
 });
 
-// Health check și metrics
 app.get('/api/health', async (req, res) => {
   const health = {
     status: 'healthy',

@@ -19,6 +19,37 @@ if (!ODDS_API_KEY) {
 
 const API_BASE = "https://v3.football.api-sports.io";
 
+// Configurare centralizată
+const CONFIG = {
+  POISSON: {
+    MAX_GOALS: 7,
+    HOME_ADVANTAGE: 1.1,
+    AWAY_DISADVANTAGE: 0.95,
+    LAMBDA_MIN: 0.4,
+    LAMBDA_MAX: 3.2
+  },
+  CONFIDENCE: {
+    WEIGHTS: {
+      dataQuality: 0.35,
+      sampleSize: 0.25,
+      clarity: 0.25,
+      recent: 0.15
+    },
+    THRESHOLDS: {
+      GOOD_DATA: { dq: 0.8, sm: 0.6, rc: 0.7 },
+      OK_DATA: { dq: 0.5, sm: 0.4 }
+    }
+  },
+  FORM: {
+    BASE_GOALS: 1.3,
+    MIN_FACTOR: 0.6,
+    MAX_FACTOR: 1.4
+  },
+  CACHE: {
+    TTL: 30 * 60 * 1000 // 30 minute
+  }
+};
+
 function getCurrentSeason() {
   const now = new Date();
   const y = now.getFullYear();
@@ -38,8 +69,28 @@ const COMPETITIONS = [
   { id: 284, code: "RO2", name: "Liga 2", apiLeagueId: 284, season: CURRENT_SEASON }
 ];
 
+// Cache cu TTL
 const teamStatsCache = new Map();
 const teamFormCache = new Map();
+
+function setWithTTL(cache, key, value) {
+  cache.set(key, {
+    value,
+    timestamp: Date.now()
+  });
+}
+
+function getWithTTL(cache, key) {
+  const item = cache.get(key);
+  if (!item) return null;
+  
+  if (Date.now() - item.timestamp > CONFIG.CACHE.TTL) {
+    cache.delete(key);
+    return null;
+  }
+  
+  return item.value;
+}
 
 function formatDate(d) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
@@ -57,6 +108,13 @@ function factorial(n) {
 
 function poissonPMF(lambda, k) {
   if (lambda <= 0) return k === 0 ? 1 : 0;
+  
+  // Aproximare Stirling pentru k > 10 (optimizare)
+  if (k > 10) {
+    return Math.exp(-lambda + k * Math.log(lambda) - 
+           (k * Math.log(k) - k + 0.5 * Math.log(2 * Math.PI * k)));
+  }
+  
   return (Math.exp(-lambda) * Math.pow(lambda, k)) / factorial(k);
 }
 
@@ -109,29 +167,31 @@ async function apiFetchWithRetry(endpoint, params, retries = 2) {
 
 async function getTeamStats(league, season, team) {
   const key = `${league}-${season}-${team}`;
-  if (teamStatsCache.has(key)) return teamStatsCache.get(key);
+  const cached = getWithTTL(teamStatsCache, key);
+  if (cached) return cached;
 
   try {
     const d = await apiFetchWithRetry("/teams/statistics", { league, season, team });
     const stats = d?.response;
-    teamStatsCache.set(key, stats || null);
+    setWithTTL(teamStatsCache, key, stats || null);
     return stats || null;
   } catch (e) {
     console.error("stats error:", e.message);
-    teamStatsCache.set(key, null);
+    setWithTTL(teamStatsCache, key, null);
     return null;
   }
 }
 
 async function getTeamRecentForm(league, season, team) {
   const key = `${league}-${season}-${team}-recent`;
-  if (teamFormCache.has(key)) return teamFormCache.get(key);
+  const cached = getWithTTL(teamFormCache, key);
+  if (cached) return cached;
 
   try {
     const d = await apiFetchWithRetry("/fixtures", { league, season, team, last: 5 });
     const resp = d?.response || [];
     if (!resp.length) {
-      teamFormCache.set(key, null);
+      setWithTTL(teamFormCache, key, null);
       return null;
     }
 
@@ -142,11 +202,11 @@ async function getTeamRecentForm(league, season, team) {
       return { home: isHome, goalsFor: gf || 0, goalsAgainst: ga || 0 };
     });
 
-    teamFormCache.set(key, list);
+    setWithTTL(teamFormCache, key, list);
     return list;
   } catch (e) {
     console.error("recent error:", e.message);
-    teamFormCache.set(key, null);
+    setWithTTL(teamFormCache, key, null);
     return null;
   }
 }
@@ -180,15 +240,20 @@ function computeFormFactor(list) {
   const n = list.length;
   const avgGF = gf / n;
   const avgGA = ga / n;
-  const base = 1.3;
+  const base = CONFIG.FORM.BASE_GOALS;
   let atk = 0.7 + 0.3 * (avgGF / base);
   let def = 0.7 + 0.3 * (base / Math.max(avgGA, 0.3));
-  return { attack: clamp(atk, 0.6, 1.4), defense: clamp(def, 0.6, 1.4), matches: n };
+  return { 
+    attack: clamp(atk, CONFIG.FORM.MIN_FACTOR, CONFIG.FORM.MAX_FACTOR), 
+    defense: clamp(def, CONFIG.FORM.MIN_FACTOR, CONFIG.FORM.MAX_FACTOR), 
+    matches: n 
+  };
 }
 
+// BUG FIX: Funcția corectată
 function computeDistributionClarity(h, d, a) {
   const s = [h, d, a].sort((x, y) => y - x);
-  const diff = (s - s) / 100;
+  const diff = (s[0] - s[1]) / 100; // ✅ Corect: diferența dintre primele două
   return Number(Math.min(1, diff / 0.4).toFixed(2));
 }
 
@@ -200,7 +265,8 @@ function buildRealConfidence({ probHome, probDraw, probAway, context }) {
     if (h >= 5 && a >= 5) dataQ = 1;
     else if (h >= 3 && a >= 3) dataQ = 0.7;
     else dataQ = 0.4;
-        sample = Math.min(1, (h + a) / 40);
+    
+    sample = Math.min(1, (h + a) / 40);
   }
 
   let recent = 0.3;
@@ -212,7 +278,8 @@ function buildRealConfidence({ probHome, probDraw, probAway, context }) {
   }
 
   const clarity = computeDistributionClarity(probHome, probDraw, probAway);
-  const score = dataQ * 0.35 + sample * 0.25 + clarity * 0.25 + recent * 0.15;
+  const weights = CONFIG.CONFIDENCE.WEIGHTS;
+  const score = dataQ * weights.dataQuality + sample * weights.sampleSize + clarity * weights.clarity + recent * weights.recent;
   const pct = Math.round(Math.max(0, Math.min(1, score)) * 100);
 
   let label = "scăzută";
@@ -241,13 +308,32 @@ function getDataFlag(ctx) {
   const sm = ctx.sampleSize;
   const rc = ctx.recentFactor;
 
-  if (dq >= 0.8 && sm >= 0.6 && rc >= 0.7) return "GOOD_DATA";
-  if (dq >= 0.5 && sm >= 0.4) return "OK_DATA";
+  const thresholds = CONFIG.CONFIDENCE.THRESHOLDS;
+  if (dq >= thresholds.GOOD_DATA.dq && sm >= thresholds.GOOD_DATA.sm && rc >= thresholds.GOOD_DATA.rc) return "GOOD_DATA";
+  if (dq >= thresholds.OK_DATA.dq && sm >= thresholds.OK_DATA.sm) return "OK_DATA";
   return "LOW_DATA";
 }
 
+function createFallbackPrediction(reason, details = '') {
+  const fallbackPred = buildPrediction(1.2, 1.1, {
+    homeMatchesTotal: 0,
+    awayMatchesTotal: 0,
+    homeRecentMatches: 0,
+    awayRecentMatches: 0,
+    dataQuality: 0.1,
+    sampleSize: 0.1,
+    recentFactor: 0.1
+  });
+  
+  fallbackPred.dataFlag = 'LOW_DATA';
+  fallbackPred.fallbackReason = reason;
+  fallbackPred.fallbackDetails = details;
+  
+  return fallbackPred;
+}
+
 function buildPrediction(lambdaHome, lambdaAway, ctx) {
-  const max = 7;
+  const max = CONFIG.POISSON.MAX_GOALS;
   const pH = [];
   const pA = [];
 
@@ -286,7 +372,7 @@ function buildPrediction(lambdaHome, lambdaAway, ctx) {
       { key: "HOME", val: probHome },
       { key: "DRAW", val: probDraw },
       { key: "AWAY", val: probAway }
-    ].sort((a, b2) => b2.val - a.val).key,
+    ].sort((a, b2) => b2.val - a.val)[0].key,
     confidence,
     confidenceDetails: {
       ...real,
@@ -312,9 +398,23 @@ function buildPrediction(lambdaHome, lambdaAway, ctx) {
   return out;
 }
 
+// Metrics tracking
+const predictionMetrics = {
+  total: 0,
+  withGoodData: 0,
+  apiErrors: 0,
+  fallbacks: 0
+};
+
 async function buildPredictionForFixture(comp, f) {
   const home = f.teams?.home?.id;
   const away = f.teams?.away?.id;
+
+  // Validare îmbunătățită
+  if (!home || !away) {
+    predictionMetrics.fallbacks++;
+    return createFallbackPrediction('MISSING_TEAM_DATA');
+  }
 
   let lH = 1.35;
   let lA = 1.25;
@@ -329,63 +429,68 @@ async function buildPredictionForFixture(comp, f) {
     recentFactor: 0.3
   };
 
-  if (home && away) {
-    try {
-      const [stH, stA, rH, rA] = await Promise.all([
-        getTeamStats(comp.apiLeagueId, comp.season, home),
-        getTeamStats(comp.apiLeagueId, comp.season, away),
-        getTeamRecentForm(comp.apiLeagueId, comp.season, home),
-        getTeamRecentForm(comp.apiLeagueId, comp.season, away)
-      ]);
+  try {
+    const [stH, stA, rH, rA] = await Promise.all([
+      getTeamStats(comp.apiLeagueId, comp.season, home),
+      getTeamStats(comp.apiLeagueId, comp.season, away),
+      getTeamRecentForm(comp.apiLeagueId, comp.season, home),
+      getTeamRecentForm(comp.apiLeagueId, comp.season, away)
+    ]);
 
-      if (stH && stA) {
-        const hP = stH.fixtures?.played?.home || 0;
-        const hGF = stH.goals?.for?.total?.home || 0;
-        const hGA = stH.goals?.against?.total?.home || 0;
+    if (stH && stA) {
+      const hP = stH.fixtures?.played?.home || 0;
+      const hGF = stH.goals?.for?.total?.home || 0;
+      const hGA = stH.goals?.against?.total?.home || 0;
 
-        const aP = stA.fixtures?.played?.away || 0;
-        const aGF = stA.goals?.for?.total?.away || 0;
-        const aGA = stA.goals?.against?.total?.away || 0;
+      const aP = stA.fixtures?.played?.away || 0;
+      const aGF = stA.goals?.for?.total?.away || 0;
+      const aGA = stA.goals?.against?.total?.away || 0;
 
-        const hAvgF = hP ? hGF / hP : 1.4;
-        const hAvgA = hP ? hGA / hP : 1.2;
-        const aAvgF = aP ? aGF / aP : 1.3;
-        const aAvgA = aP ? aGA / aP : 1.2;
+      const hAvgF = hP ? hGF / hP : 1.4;
+      const hAvgA = hP ? hGA / hP : 1.2;
+      const aAvgF = aP ? aGF / aP : 1.3;
+      const aAvgA = aP ? aGA / aP : 1.2;
 
-        lH = (hAvgF + aAvgA) / 2;
-        lA = (aAvgF + hAvgA) / 2;
+      lH = (hAvgF + aAvgA) / 2;
+      lA = (aAvgF + hAvgA) / 2;
 
-        lH *= 1.1;
-        lA *= 0.95;
+      lH *= CONFIG.POISSON.HOME_ADVANTAGE;
+      lA *= CONFIG.POISSON.AWAY_DISADVANTAGE;
 
-        lH = clamp(lH, 0.4, 3.2);
-        lA = clamp(lA, 0.4, 3.2);
+      lH = clamp(lH, CONFIG.POISSON.LAMBDA_MIN, CONFIG.POISSON.LAMBDA_MAX);
+      lA = clamp(lA, CONFIG.POISSON.LAMBDA_MIN, CONFIG.POISSON.LAMBDA_MAX);
 
-        const fH = computeFormFactor(rH);
-        const fA = computeFormFactor(rA);
+      const fH = computeFormFactor(rH);
+      const fA = computeFormFactor(rA);
 
-        lH *= fH.attack * fA.defense;
-        lA *= fA.attack * fH.defense;
+      lH *= fH.attack * fA.defense;
+      lA *= fA.attack * fH.defense;
 
-        lH = clamp(lH, 0.4, 3.2);
-        lA = clamp(lA, 0.4, 3.2);
+      lH = clamp(lH, CONFIG.POISSON.LAMBDA_MIN, CONFIG.POISSON.LAMBDA_MAX);
+      lA = clamp(lA, CONFIG.POISSON.LAMBDA_MIN, CONFIG.POISSON.LAMBDA_MAX);
 
-        ctx.homeMatchesTotal = stH.fixtures?.played?.total || 0;
-        ctx.awayMatchesTotal = stA.fixtures?.played?.total || 0;
-        ctx.homeRecentMatches = fH.matches;
-        ctx.awayRecentMatches = fA.matches;
+      ctx.homeMatchesTotal = stH.fixtures?.played?.total || 0;
+      ctx.awayMatchesTotal = stA.fixtures?.played?.total || 0;
+      ctx.homeRecentMatches = fH.matches;
+      ctx.awayRecentMatches = fA.matches;
 
-        ctx.dataQuality = ctx.homeMatchesTotal >= 5 && ctx.awayMatchesTotal >= 5 ? 1 : ctx.homeMatchesTotal >= 3 && ctx.awayMatchesTotal >= 3 ? 0.7 : 0.4;
-        ctx.sampleSize = Math.min(1, (ctx.homeMatchesTotal + ctx.awayMatchesTotal) / 40);
-        ctx.recentFactor = fH.matches >= 5 && fA.matches >= 5 ? 1 : fH.matches >= 3 && fA.matches >= 3 ? 0.7 : fH.matches >= 1 && fA.matches >= 1 ? 0.5 : 0.3;
-      }
-    } catch (e) {
-      console.error("prediction context error:", e.message);
+      ctx.dataQuality = ctx.homeMatchesTotal >= 5 && ctx.awayMatchesTotal >= 5 ? 1 : ctx.homeMatchesTotal >= 3 && ctx.awayMatchesTotal >= 3 ? 0.7 : 0.4;
+      ctx.sampleSize = Math.min(1, (ctx.homeMatchesTotal + ctx.awayMatchesTotal) / 40);
+      ctx.recentFactor = fH.matches >= 5 && fA.matches >= 5 ? 1 : fH.matches >= 3 && fA.matches >= 3 ? 0.7 : fH.matches >= 1 && fA.matches >= 1 ? 0.5 : 0.3;
     }
+  } catch (e) {
+    console.error("prediction context error:", e.message);
+    predictionMetrics.apiErrors++;
+    return createFallbackPrediction('API_ERROR', e.message);
   }
 
+  predictionMetrics.total++;
+  if (ctx.dataQuality >= 0.8) predictionMetrics.withGoodData++;
+  
   return buildPrediction(lH, lA, ctx);
 }
+
+// Endpoint-uri
 app.get("/api/test-key", (req, res) =>
   res.json({ ok: !!API_KEY, message: API_KEY ? "Cheie OK" : "Missing" })
 );
@@ -410,6 +515,37 @@ app.get("/api/competitions", (req, res) => {
       season: c.season
     }))
   );
+});
+
+// Health check și metrics
+app.get('/api/health', async (req, res) => {
+  const health = {
+    status: 'healthy',
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    memory: process.memoryUsage(),
+    api: 'unknown'
+  };
+
+  try {
+    const apiStatus = await apiFetchWithRetry('/status', null, 1);
+    health.api = apiStatus?.response ? 'healthy' : 'degraded';
+  } catch (e) {
+    health.api = 'unhealthy';
+    health.apiError = e.message;
+  }
+
+  res.json(health);
+});
+
+app.get('/api/metrics', (req, res) => {
+  res.json({
+    predictions: predictionMetrics,
+    cache: {
+      stats: teamStatsCache.size,
+      form: teamFormCache.size
+    }
+  });
 });
 
 app.get("/api/matches", async (req, res) => {

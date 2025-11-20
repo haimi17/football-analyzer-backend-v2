@@ -290,8 +290,8 @@ function getMatchProfile(p) {
   const h = p.probHome, d = p.probDraw, a = p.probAway;
   const b = p.btts.yes;
 
-  if (over25 >= 60 && b >= 55) return "GOALS_GAME";
-  if (h >= 50 && under25 >= 55) return "HOME_AND_UNDER";
+  if (over25 >= 60 && b >= 55) return "OVER_2.5_AND_BTTS";
+  if (h >= 50 && under25 >= 55) return "HOME_AND_UNDER_2.5";
   if (Math.abs(h - a) <= 10 && b >= 60) return "BALANCED_BTTS";
   if (h < 40 && a < 40 && d > 25) return "HIGH_VARIANCE";
   if (h >= 55) return "STRONG_HOME";

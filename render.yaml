@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: football-pro-analyzer
+    env: node
+    plan: free
+    region: frankfurt
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: API_FOOTBALL_KEY
+        sync: false
+      - key: ODDS_API_KEY
+        sync: false
+    healthCheckPath: /api/health
